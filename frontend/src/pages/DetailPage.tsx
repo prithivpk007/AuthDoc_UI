@@ -8,22 +8,10 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
 
 import { verifyDocument } from '@/lib/api';
-import type { VerificationStatus } from '@/lib/api';
-
-/* ------------------------------------------------------------------ */
-/* Types – guaranteed by backend                                      */
-/* ------------------------------------------------------------------ */
-
-interface FieldResult {
-  value: number | null;
-  status: VerificationStatus;
-  reason: string;
-}
-
-interface VerifyResponse {
-  document_id: string;
-  results: Record<string, FieldResult>;
-}
+import type {
+  VerificationResults,
+  VerificationStatus
+} from '@/lib/api';
 
 /* ------------------------------------------------------------------ */
 /* Component                                                          */
@@ -33,7 +21,7 @@ const DetailPage = () => {
   const { documentId } = useParams<{ documentId: string }>();
   const navigate = useNavigate();
 
-  const [data, setData] = useState<VerifyResponse | null>(null);
+  const [data, setData] = useState<VerificationResults | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,10 +36,7 @@ const DetailPage = () => {
       return;
     }
 
-    setLoading(true);
-    setError(null);
-
-    verifyDocument(documentId, 'strict')
+    verifyDocument(documentId)
       .then(setData)
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -66,7 +51,7 @@ const DetailPage = () => {
       <div className="flex min-h-screen flex-col">
         <Header />
         <main className="flex flex-1 items-center justify-center">
-          <p className="text-muted-foreground">Loading verification...</p>
+          <p className="text-muted-foreground">Loading verification…</p>
         </main>
         <Footer />
       </div>
@@ -84,6 +69,8 @@ const DetailPage = () => {
       </div>
     );
   }
+
+  const { verification } = data;
 
   /* ---------------------------------------------------------------- */
   /* Render                                                           */
@@ -105,58 +92,60 @@ const DetailPage = () => {
             Back to Batch Results
           </button>
 
-          {/* Header */}
           <h1 className="mb-6 text-2xl font-bold">
             Verification Details
           </h1>
 
-          {/* Field-level results */}
-          <div className="overflow-hidden rounded-xl border bg-card">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b bg-secondary/50">
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Field
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Extracted Value
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Reason
-                  </th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {Object.entries(data.results).map(([field, result], index, arr) => (
-                  <tr
-                    key={field}
-                    className={`border-b ${
-                      index === arr.length - 1 ? 'border-b-0' : ''
-                    }`}
-                  >
-                    <td className="px-6 py-4 font-medium">
-                      {field.toUpperCase()}
-                    </td>
-                    <td className="px-6 py-4 text-muted-foreground">
-                      {result.value ?? '—'}
-                    </td>
-                    <td className="px-6 py-4">
-                      <StatusBadge status={result.status} />
-                    </td>
-                    <td className="px-6 py-4 text-sm text-muted-foreground">
-                      {result.reason}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {/* Overall status */}
+          <div className="mb-6 flex items-center gap-4 rounded-xl border bg-card p-6">
+            <StatusBadge status={verification.overall_status} />
+            <p className="text-sm text-muted-foreground">
+              {verification.reason ?? '—'}
+            </p>
           </div>
 
-          {/* Back button */}
+          {/* Arrears */}
+          {verification.arrears?.length ? (
+            <div className="mb-6 rounded-xl border border-destructive/40 bg-destructive/5 p-6">
+              <h2 className="mb-2 font-semibold text-destructive">
+                Arrear Subjects
+              </h2>
+              <ul className="list-disc pl-5 text-sm">
+                {verification.arrears.map(code => (
+                  <li key={code}>{code}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {/* Mismatches */}
+          {verification.mismatches?.length ? (
+            <div className="overflow-hidden rounded-xl border bg-card">
+              <table className="w-full">
+                <thead className="border-b bg-secondary/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-sm">Subject</th>
+                    <th className="px-6 py-3 text-left text-sm">Expected</th>
+                    <th className="px-6 py-3 text-left text-sm">Found</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {verification.mismatches.map((m, i) => (
+                    <tr key={i} className="border-b last:border-b-0">
+                      <td className="px-6 py-4 font-medium">{m.subject}</td>
+                      <td className="px-6 py-4 text-muted-foreground">
+                        {m.expected ?? '—'}
+                      </td>
+                      <td className="px-6 py-4 text-muted-foreground">
+                        {m.found ?? m.issue ?? '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
           <div className="mt-8">
             <Button variant="outline" onClick={() => navigate('/results')}>
               <ArrowLeft className="mr-2 h-4 w-4" />

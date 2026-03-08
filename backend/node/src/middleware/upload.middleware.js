@@ -24,7 +24,6 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
-// 👇 EXPLICIT exports
 module.exports = {
   singleUpload: upload.single("file"),
   batchUpload: upload.array("files", 10) // max 10 files

@@ -180,11 +180,18 @@ FILE: backend/node/package.json
 FILE: backend/node/src/app.js
 ================================================
 const express = require("express");
+const cors = require("cors");
 const verifyRoutes = require("./routes/verify.routes");
 
 const app = express();
-app.use(express.json());
+app.use(
+  cors({
+    origin: "http://localhost:8080",
+    methods: ["GET", "POST"],
+  })
+);
 
+app.use(express.json());
 app.use("/api", verifyRoutes);
 
 module.exports = app;
@@ -208,19 +215,36 @@ app.listen(PORT, () => {
 FILE: backend/node/src/config/policies.json
 ================================================
 {
-  "strict": {
-    "required_fields": ["gpa", "cgpa", "result_status"],
-    "rules": [
-      { "type": "range", "field": "gpa", "min": 0, "max": 10 },
-      { "type": "delta", "field": "cgpa", "compare_with": "gpa", "max_diff": 1.0 },
-      { "type": "dependency", "field": "result_status", "depends_on": "subject_grades" }
-    ]
+  "2403732210421149": {
+    "student_name": "PRITHIV KRISHNA G",
+    "subjects": {
+      "22CSC02": "B",
+      "22CSC03": "C",
+      "22CSC04": "B",
+      "22GYA02": "B",
+      "22MYB03": "B+",
+      "22CSP02": "U",
+      "22CSP03": "A+",
+      "22MEP01": "A",
+      "22MAN02R": "SF",
+      "22MAN05": "G",
+      "22EYA02": "A"
+    }
   },
-  "lenient": {
-    "required_fields": ["gpa", "result_status"],
-    "rules": [
-      { "type": "range", "field": "gpa", "min": 5, "max": 10 }
-    ]
+  "2403732210422160": {
+    "student_name": "RATHIPRIYA S",
+    "subjects": {
+      "22CSC01": "A",
+      "22ECC01": "A",
+      "22GYA01": "A",
+      "22MYB01": "A",
+      "22PYB01": "O",
+      "22CSP01": "O",
+      "22ECP01": "A+",
+      "22PYP01": "A+",
+      "22MAN03": "G",
+      "22EYA01": "U"
+    }
   }
 }
 
@@ -230,109 +254,191 @@ FILE: backend/node/src/config/policies.json
 FILE: backend/node/src/controllers/verify.controller.js
 ================================================
 const { randomUUID } = require("crypto");
-const policies = require("../config/policies.json");
 const store = require("../store/documentStore");
 const { sendToOCR } = require("../services/pythonClient");
 const { verify } = require("../services/verifier.service");
-const { mapSingleVerification } = require("../utils/responseMapper");
 
-// Single ingest
-exports.ingest = async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "File is required" });
+/* ------------------------------------------------------------------ */
+/* Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+function safeVerification(data) {
+  if (!data || typeof data !== "object") {
+    return {
+      overall_status: "MISSING",
+      reason: "Document data not available"
+    };
   }
-
-  const documentId = randomUUID();
 
   try {
-    const extracted = await sendToOCR(req.file);
-    store.save(documentId, extracted);
+    return verify(data);
   } catch (err) {
-    console.error("OCR failed:", err.message);
-    store.save(documentId, {});
+    console.error("Verification failed:", err.message);
+    return {
+      overall_status: "FLAGGED",
+      reason: "Verification engine error"
+    };
   }
+}
 
-  res.status(201).json({ document_id: documentId });
-};
+/* ------------------------------------------------------------------ */
+/* Single document ingest                                             */
+/* ------------------------------------------------------------------ */
 
-// Batch ingest
-exports.ingestBatch = async (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: "No files uploaded" });
-  }
+exports.ingest = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "File is required" });
+    }
 
-  const documents = [];
+    const document_id = randomUUID();
 
-  for (const file of req.files) {
-    const documentId = randomUUID();
+    let extracted = {};
 
     try {
-      const extracted = await sendToOCR(file);
-      store.save(documentId, extracted);
+      extracted = await sendToOCR(req.file);
     } catch (err) {
       console.error("OCR failed:", err.message);
-      store.save(documentId, {});
     }
 
-    documents.push({ document_id: documentId });
-  }
+    store.save(document_id, extracted);
 
-  res.status(201).json({
-    count: documents.length,
-    documents
-  });
+    return res.status(201).json({
+      document_id
+    });
+
+  } catch (err) {
+    console.error("Ingest error:", err);
+    return res.status(500).json({
+      error: "Internal server error"
+    });
+  }
 };
 
-// Verify single
-exports.verifySingle = (req, res) => {
-  const { document_id, policy_id } = req.body;
+/* ------------------------------------------------------------------ */
+/* Batch document ingest                                              */
+/* ------------------------------------------------------------------ */
 
-  const policy = policies[policy_id];
-  if (!policy) {
-    return res.status(400).json({ error: "Invalid policy_id" });
-  }
+exports.ingestBatch = async (req, res) => {
+  try {
+    if (!req.files || !Array.isArray(req.files) || req.files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded" });
+    }
 
-  const data = store.get(document_id);
-  if (!data) {
-    return res.status(404).json({ error: "Document not found" });
-  }
+    const documents = [];
 
-  const results = verify(data, policy);
-  const response = mapSingleVerification(document_id, results);
+    for (const file of req.files) {
+      const document_id = randomUUID();
+      let extracted = {};
 
-  res.json(response);
-};
-
-// Verify batch
-exports.verifyBatch = (req, res) => {
-  const { document_ids, policy_id } = req.body;
-
-  const policy = policies[policy_id];
-  if (!policy) {
-    return res.status(400).json({ error: "Invalid policy_id" });
-  }
-
-  const candidates = document_ids.map((id) => {
-    const data = store.get(id) || {};
-    const results = verify(data, policy);
-
-    let overall_status = "VERIFIED";
-    const fields = {};
-
-    for (const field of policy.required_fields) {
-      const status = results[field]?.status || "MISSING";
-      fields[field] = status;
-
-      if (status === "MISSING") overall_status = "MISSING";
-      else if (status === "FLAGGED" && overall_status !== "MISSING") {
-        overall_status = "FLAGGED";
+      try {
+        extracted = await sendToOCR(file);
+      } catch (err) {
+        console.error("OCR failed:", err.message);
       }
+
+      store.save(document_id, extracted);
+
+      documents.push({ document_id });
     }
 
-    return { document_id: id, overall_status, fields };
-  });
+    return res.status(201).json({
+      count: documents.length,
+      documents
+    });
 
-  res.json({ candidates });
+  } catch (err) {
+    console.error("Batch ingest error:", err);
+    return res.status(500).json({
+      error: "Internal server error"
+    });
+  }
+};
+
+/* ------------------------------------------------------------------ */
+/* Verify single document                                             */
+/* ------------------------------------------------------------------ */
+
+exports.verifySingle = (req, res) => {
+  try {
+    const { document_id } = req.body;
+
+    if (!document_id) {
+      return res.status(400).json({
+        error: "document_id is required"
+      });
+    }
+
+    const data = store.get(document_id);
+
+    if (!data) {
+      return res.status(404).json({
+        error: "Document not found"
+      });
+    }
+
+    const verification = safeVerification(data);
+
+    return res.json({
+      document_id,
+      student_name: data.student_name || null,
+      umis_no: data.umis_no || null,
+      subject_grades: data.subject_grades || [],
+      verification
+    });
+
+  } catch (err) {
+    console.error("Verify single error:", err);
+    return res.status(500).json({
+      error: "Internal server error"
+    });
+  }
+};
+
+/* ------------------------------------------------------------------ */
+/* Verify batch documents (SUMMARY view)                              */
+/* ------------------------------------------------------------------ */
+
+exports.verifyBatch = (req, res) => {
+  try {
+    const { document_ids } = req.body;
+
+    if (!document_ids || !Array.isArray(document_ids)) {
+      return res.status(400).json({
+        error: "document_ids must be an array"
+      });
+    }
+
+    const candidates = document_ids.map(id => {
+      const data = store.get(id);
+
+      if (!data) {
+        return {
+          document_id: id,
+          student_name: null,
+          umis_no: null,
+          overall_status: "MISSING"
+        };
+      }
+
+      const verification = safeVerification(data);
+
+      return {
+        document_id: id,
+        student_name: data.student_name || null,
+        umis_no: data.umis_no || null,
+        overall_status: verification.overall_status
+      };
+    });
+
+    return res.json({ candidates });
+
+  } catch (err) {
+    console.error("Verify batch error:", err);
+    return res.status(500).json({
+      error: "Internal server error"
+    });
+  }
 };
 
 
@@ -366,7 +472,6 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
-// ðŸ‘‡ EXPLICIT exports
 module.exports = {
   singleUpload: upload.single("file"),
   batchUpload: upload.array("files", 10) // max 10 files
@@ -380,27 +485,13 @@ FILE: backend/node/src/routes/verify.routes.js
 const express = require("express");
 const router = express.Router();
 
-const {
-  singleUpload,
-  batchUpload
-} = require("../middleware/upload.middleware");
+const { singleUpload, batchUpload } =
+  require("../middleware/upload.middleware");
 
 const controller = require("../controllers/verify.controller");
 
-// Single document ingest
-router.post(
-  "/ingest",
-  singleUpload,
-  controller.ingest
-);
-
-// Batch document ingest
-router.post(
-  "/ingest/batch",
-  batchUpload,
-  controller.ingestBatch
-);
-
+router.post("/ingest", singleUpload, controller.ingest);
+router.post("/ingest/batch", batchUpload, controller.ingestBatch);
 router.post("/verify", controller.verifySingle);
 router.post("/verify/batch", controller.verifyBatch);
 
@@ -445,51 +536,76 @@ module.exports = { sendToOCR };
 ================================================
 FILE: backend/node/src/services/verifier.service.js
 ================================================
-/**
- * Generic rule-based verification engine
- */
-exports.verify = (data, policy) => {
-  const results = {};
+const db = require("../config/policies.json");
 
-  const set = (field, status, reason) => {
-    if (results[field]?.status === "MISSING" && status === "VERIFIED") return;
-    results[field] = {
-      value: data[field] ?? null,
-      status,
-      reason
+const ARREAR_GRADES = ["U", "RA", "AB", "WD", "FAIL"];
+
+exports.verify = (data) => {
+  const { umis_no, subject_grades } = data;
+
+  if (!umis_no) {
+    return {
+      overall_status: "MISSING",
+      reason: "UMIS number not detected from document"
     };
-  };
+  }
 
-  for (const rule of policy.rules) {
-    if (rule.type === "range") {
-      const v = data[rule.field];
-      if (v == null || Number.isNaN(v))
-        set(rule.field, "MISSING", "Value missing");
-      else if (v < rule.min || v > rule.max)
-        set(rule.field, "FLAGGED", "Out of allowed range");
-      else set(rule.field, "VERIFIED", "Within allowed range");
+  const record = db[umis_no];
+
+  if (!record) {
+    return {
+      overall_status: "FLAGGED",
+      reason: "UMIS number not found in institutional database"
+    };
+  }
+
+  const mismatches = [];
+  const arrears = [];
+
+  for (const sub of subject_grades) {
+    const expected = record.subjects[sub.code];
+
+    if (!expected) {
+      mismatches.push({
+        subject: sub.code,
+        issue: "Subject not present in DB"
+      });
+      continue;
     }
 
-    if (rule.type === "delta") {
-      const a = data[rule.field];
-      const b = data[rule.compare_with];
-      if (a == null || b == null)
-        set(rule.field, "MISSING", "Comparison data missing");
-      else if (Math.abs(a - b) > rule.max_diff)
-        set(rule.field, "FLAGGED", "Deviation exceeds threshold");
-      else set(rule.field, "VERIFIED", "Difference acceptable");
+    if (expected !== sub.grade) {
+      mismatches.push({
+        subject: sub.code,
+        expected,
+        found: sub.grade
+      });
     }
 
-    if (rule.type === "dependency") {
-      const grades = data[rule.depends_on] || [];
-      const hasFail = grades.some(g => g.grade !== "PASS");
-      if (hasFail && data[rule.field] === "PASS")
-        set(rule.field, "FLAGGED", "Result conflicts with failed subject");
-      else set(rule.field, "VERIFIED", "Dependency satisfied");
+    if (ARREAR_GRADES.includes(sub.grade)) {
+      arrears.push(sub.code);
     }
   }
 
-  return results;
+  if (arrears.length > 0) {
+    return {
+      overall_status: "FLAGGED",
+      reason: "Arrear subjects detected",
+      arrears
+    };
+  }
+
+  if (mismatches.length > 0) {
+    return {
+      overall_status: "FLAGGED",
+      reason: "Subject mismatches found",
+      mismatches
+    };
+  }
+
+  return {
+    overall_status: "VERIFIED",
+    reason: "All subjects match institutional records and are cleared"
+  };
 };
 
 
@@ -500,8 +616,8 @@ FILE: backend/node/src/store/documentStore.js
 const store = new Map();
 
 /**
- * In-memory document store
- * No DB by design (prototype)
+ * In-memory document stored as the temp file in the local data of the C drive
+   No DB by design (prototype)
  */
 module.exports = {
   save(id, data) {
@@ -553,38 +669,35 @@ exports.matchValue = (text, regex) => {
 ================================================
 FILE: backend/python/extractor.py
 ================================================
-import pytesseract
-from PIL import Image, ImageEnhance
+import os
+import re
 import cv2
 import numpy as np
-import re
-# ⚠️ Make this configurable in production
-pytesseract.pytesseract.tesseract_cmd = r"D:\products\AuthDoc\tesseract\tesseract.exe"
-# -----------------------------
-# Image preprocessing
-# -----------------------------
+import pytesseract
+from PIL import Image, ImageEnhance
+
+# Optional environment-based config
+TESSERACT_PATH = os.getenv("TESSERACT_PATH")
+if TESSERACT_PATH:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
+
+# -------------------------------------------------
+# Image Preprocessing
+# -------------------------------------------------
+
 def preprocess_image(path: str):
     img = Image.open(path).convert("L")
-
-    enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(2.5)
-
+    img = ImageEnhance.Contrast(img).enhance(2.5)
     img = np.array(img)
-
     img = cv2.fastNlMeansDenoising(img, None, 20, 7, 21)
     return img
 
 
-def validate_image(img):
-    h, w = img.shape
-    if w < 800 or h < 1000:
-        return False, "Image resolution too low for OCR"
-    return True, None
+# -------------------------------------------------
+# Text Utilities
+# -------------------------------------------------
 
-
-# -----------------------------
-# Text extraction helpers
-# -----------------------------
 def normalize(text: str):
     return re.sub(r"\s+", " ", text.replace("(", " ").replace(")", " "))
 
@@ -593,6 +706,10 @@ def to_float(value: str):
     return float(value.replace(",", "."))
 
 
+# -------------------------------------------------
+# Field Extraction
+# -------------------------------------------------
+
 def extract_fields(text: str):
     text = normalize(text)
 
@@ -600,56 +717,54 @@ def extract_fields(text: str):
         m = re.search(pattern, text, re.I)
         return m.group(1).strip() if m else None
 
-    gpa = re.search(
-        r"(GPA|GEA|GRADE POINT AVERAGE|GRADE POINT AVORAG[E|O])[^0-9]{0,20}([\d]+[.,][\d]+)",
+    # UMIS
+    umis_no = find(r"UMIS\s*NO\s*[:\-]?\s*(\d+)")
+
+    # GPA (more tolerant)
+    gpa_match = re.search(
+        r"(GPA|GRADE POINT AVERAGE)[^0-9]{0,20}([\d]+[.,][\d]+)",
         text,
-        re.I,
+        re.I
+    )
+    gpa = to_float(gpa_match.group(2)) if gpa_match else None
+
+    # CGPA
+    cgpa_match = re.search(
+        r"(CGPA|CUMULATIVE GRADE POINT AVERAGE)[^0-9]{0,20}([\d]+[.,][\d]+)",
+        text,
+        re.I
     )
 
-    cgpa = re.search(
-        r"(CGPA|COPA|CUMULATIVE GRADE POINT AVERAGE|CUMULATIVE GRADE POINT AVORAG[E|O])[^0-9]{0,20}([\d]+[.][\d]+)",
-        text,
-        re.I,
-    )
+    if cgpa_match:
+        cgpa = to_float(cgpa_match.group(2))
+    elif re.search(r"CGPA\s*[\*\.]{2,}", text):
+        cgpa = "WITHHELD"
+    else:
+        cgpa = None
 
+    # Subjects
     subjects = re.findall(
-        r"\b([A-Z]{2,4}\d{2,4})\s+[A-Z &]+\s+\d+\s+\d+\s+([A-Z+])",
-        text,
+        r"\b([A-Z]{2,4}\d{2,4})\s+[A-Z &]+\s+\d+\s+\d+\s+([A-Z+]{1,2})",
+        text
     )
 
-    subject_grades = [{"code": c, "grade": g} for c, g in subjects]
+    subject_grades = [{"code": code, "grade": grade} for code, grade in subjects]
 
     return {
-        "student_name": find(r"NAME\s+OF\s+THE\s+CANDI[A-Z]{2,4}\s+([A-Z ]+)"),
-        "register_number": find(r"REGISTER\s*NO\s*[:\-]?\s*([A-Z0-9]+)"),
-        "programme_or_branch": find(r"PROGRAMME\s*&?\s*BRANCH\s*[:\-]?\s*([A-Z .]+)"),
-        "semester": find(r"(FIRST|SECOND|THIRD|FOURTH)\s+SEMESTER"),
+        "umis_no": umis_no,
         "subject_grades": subject_grades,
-        "gpa": to_float(gpa.group(2)) if gpa else None,
-        "cgpa": to_float(cgpa.group(2)) if cgpa else None,
+        "gpa": gpa,
+        "cgpa": cgpa
     }
 
 
-# -----------------------------
-# OCR ENTRY POINT (PER DOCUMENT)
-# -----------------------------
-def run_ocr(path: str):
-    print(">>> OCR FUNCTION ENTERED <<<", path)
+# -------------------------------------------------
+# OCR ENTRY POINT
+# -------------------------------------------------
 
+def run_ocr(path: str):
     try:
         img = preprocess_image(path)
-
-        ok, err = validate_image(img)
-        if not ok:
-            return {
-                "student_name": None,
-                "register_number": None,
-                "programme_or_branch": None,
-                "semester": None,
-                "gpa": None,
-                "cgpa": None,
-                "subject_grades": [],
-            }
 
         text = pytesseract.image_to_string(
             img,
@@ -657,22 +772,15 @@ def run_ocr(path: str):
             config="--oem 3 --psm 6"
         )
 
-        print("==== OCR RAW TEXT START ====")
-        print(text)
-        print("==== OCR RAW TEXT END ====")
-
         return extract_fields(text)
 
     except Exception as e:
         print("OCR ERROR:", e)
         return {
-            "student_name": None,
-            "register_number": None,
-            "programme_or_branch": None,
-            "semester": None,
-            "gpa": None,
-            "cgpa": None,
+            "umis_no": None,
             "subject_grades": [],
+            "gpa": None,
+            "cgpa": None
         }
 
 
@@ -6389,35 +6497,38 @@ export { useToast, toast };
 ================================================
 FILE: frontend/src/lib/api.ts
 ================================================
-// AuthDoc API Service Layer (Production Grade)
-
-/* ------------------------------------------------------------------ */
-/* Base Configuration                                                  */
-/* ------------------------------------------------------------------ */
+// AuthDoc API Service Layer (Production Ready)
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
 /* ------------------------------------------------------------------ */
-/* Domain Types (Canonical)                                            */
+/* Domain Types (Authoritative)                                        */
 /* ------------------------------------------------------------------ */
 
 export type VerificationStatus = 'VERIFIED' | 'FLAGGED' | 'MISSING';
 
-export interface VerificationField {
-  value: number | null;            // Contract-guaranteed
-  status: VerificationStatus;      // Source of truth
-  reason: string;                  // Human explanation
+export interface SubjectMismatch {
+  subject: string;
+  expected?: string;
+  found?: string;
+  issue?: string;
+}
+
+export interface VerificationPayload {
+  overall_status: VerificationStatus;
+  reason?: string;
+  mismatches?: SubjectMismatch[];
+  arrears?: string[];
 }
 
 export interface VerificationResults {
   document_id: string;
-  results: Record<string, VerificationField>;
+  verification: VerificationPayload;
 }
 
 export interface BatchCandidate {
   document_id: string;
   overall_status: VerificationStatus;
-  fields: Record<string, VerificationStatus>;
 }
 
 export interface BatchVerificationResponse {
@@ -6436,12 +6547,11 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   const data = await response.json();
 
   if (!response.ok) {
-    const message =
+    throw new Error(
       typeof data?.error === 'string'
         ? data.error
-        : response.statusText;
-
-    throw new Error(message);
+        : response.statusText
+    );
   }
 
   return data;
@@ -6451,10 +6561,6 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 /* API Calls                                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * Upload and ingest a document
- * Upload NEVER fails by contract
- */
 export async function ingestDocument(file: File): Promise<IngestResponse> {
   const formData = new FormData();
   formData.append('file', file);
@@ -6467,66 +6573,28 @@ export async function ingestDocument(file: File): Promise<IngestResponse> {
   return parseJsonResponse<IngestResponse>(response);
 }
 
-/**
- * Verify a single document using a policy
- */
 export async function verifyDocument(
-  documentId: string,
-  policyId: string = 'strict'
+  documentId: string
 ): Promise<VerificationResults> {
   const response = await fetch(`${API_BASE_URL}/verify`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      document_id: documentId,
-      policy_id: policyId,
-    }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document_id: documentId }),
   });
 
   return parseJsonResponse<VerificationResults>(response);
 }
 
-/**
- * Batch verify multiple documents (summary only)
- */
 export async function batchVerifyDocuments(
-  documentIds: string[],
-  policyId: string = 'strict'
+  documentIds: string[]
 ): Promise<BatchVerificationResponse> {
   const response = await fetch(`${API_BASE_URL}/verify/batch`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      document_ids: documentIds,
-      policy_id: policyId,
-    }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document_ids: documentIds }),
   });
 
   return parseJsonResponse<BatchVerificationResponse>(response);
-}
-
-/**
- * Upload and verify multiple documents sequentially
- * Prototype-safe, DB-independent
- */
-export async function uploadAndVerifyBatch(
-  files: File[],
-  policyId: string = 'strict',
-  onProgress?: (current: number, total: number) => void
-): Promise<BatchVerificationResponse> {
-  const documentIds: string[] = [];
-
-  for (let i = 0; i < files.length; i++) {
-    const { document_id } = await ingestDocument(files[i]);
-    documentIds.push(document_id);
-    onProgress?.(i + 1, files.length);
-  }
-
-  return batchVerifyDocuments(documentIds, policyId);
 }
 
 
@@ -6558,22 +6626,11 @@ import { Footer } from '@/components/Footer';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
 
-import type { VerificationStatus } from '@/lib/api';
-
-/* ------------------------------------------------------------------ */
-/* Types â€“ guaranteed by backend                                      */
-/* ------------------------------------------------------------------ */
-
-interface FieldResult {
-  value: number | null;
-  status: VerificationStatus;
-  reason: string;
-}
-
-interface VerifyResponse {
-  document_id: string;
-  results: Record<string, FieldResult>;
-}
+import { verifyDocument } from '@/lib/api';
+import type {
+  VerificationResults,
+  VerificationStatus
+} from '@/lib/api';
 
 /* ------------------------------------------------------------------ */
 /* Component                                                          */
@@ -6583,7 +6640,7 @@ const DetailPage = () => {
   const { documentId } = useParams<{ documentId: string }>();
   const navigate = useNavigate();
 
-  const [data, setData] = useState<VerifyResponse | null>(null);
+  const [data, setData] = useState<VerificationResults | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -6598,34 +6655,10 @@ const DetailPage = () => {
       return;
     }
 
-    const fetchVerification = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const res = await fetch('/api/verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            document_id: documentId,
-            policy_id: 'strict',
-          }),
-        });
-
-        if (!res.ok) {
-          throw new Error('Verification failed');
-        }
-
-        const json: VerifyResponse = await res.json();
-        setData(json);
-      } catch (err) {
-        setError((err as Error).message);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchVerification();
+    verifyDocument(documentId)
+      .then(setData)
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false));
   }, [documentId]);
 
   /* ---------------------------------------------------------------- */
@@ -6656,6 +6689,8 @@ const DetailPage = () => {
     );
   }
 
+  const { verification } = data;
+
   /* ---------------------------------------------------------------- */
   /* Render                                                           */
   /* ---------------------------------------------------------------- */
@@ -6676,58 +6711,60 @@ const DetailPage = () => {
             Back to Batch Results
           </button>
 
-          {/* Header */}
           <h1 className="mb-6 text-2xl font-bold">
             Verification Details
           </h1>
 
-          {/* Field-level results */}
-          <div className="overflow-hidden rounded-xl border bg-card">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b bg-secondary/50">
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Field
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Extracted Value
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm text-muted-foreground">
-                    Reason
-                  </th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {Object.entries(data.results).map(([field, result], index, arr) => (
-                  <tr
-                    key={field}
-                    className={`border-b ${
-                      index === arr.length - 1 ? 'border-b-0' : ''
-                    }`}
-                  >
-                    <td className="px-6 py-4 font-medium">
-                      {field.toUpperCase()}
-                    </td>
-                    <td className="px-6 py-4 text-muted-foreground">
-                      {result.value ?? 'â€”'}
-                    </td>
-                    <td className="px-6 py-4">
-                      <StatusBadge status={result.status} />
-                    </td>
-                    <td className="px-6 py-4 text-sm text-muted-foreground">
-                      {result.reason}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {/* Overall status */}
+          <div className="mb-6 flex items-center gap-4 rounded-xl border bg-card p-6">
+            <StatusBadge status={verification.overall_status} />
+            <p className="text-sm text-muted-foreground">
+              {verification.reason ?? 'â€”'}
+            </p>
           </div>
 
-          {/* Back button */}
+          {/* Arrears */}
+          {verification.arrears?.length ? (
+            <div className="mb-6 rounded-xl border border-destructive/40 bg-destructive/5 p-6">
+              <h2 className="mb-2 font-semibold text-destructive">
+                Arrear Subjects
+              </h2>
+              <ul className="list-disc pl-5 text-sm">
+                {verification.arrears.map(code => (
+                  <li key={code}>{code}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {/* Mismatches */}
+          {verification.mismatches?.length ? (
+            <div className="overflow-hidden rounded-xl border bg-card">
+              <table className="w-full">
+                <thead className="border-b bg-secondary/50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-sm">Subject</th>
+                    <th className="px-6 py-3 text-left text-sm">Expected</th>
+                    <th className="px-6 py-3 text-left text-sm">Found</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {verification.mismatches.map((m, i) => (
+                    <tr key={i} className="border-b last:border-b-0">
+                      <td className="px-6 py-4 font-medium">{m.subject}</td>
+                      <td className="px-6 py-4 text-muted-foreground">
+                        {m.expected ?? 'â€”'}
+                      </td>
+                      <td className="px-6 py-4 text-muted-foreground">
+                        {m.found ?? m.issue ?? 'â€”'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
           <div className="mt-8">
             <Button variant="outline" onClick={() => navigate('/results')}>
               <ArrowLeft className="mr-2 h-4 w-4" />
@@ -6877,7 +6914,7 @@ export default NotFound;
 FILE: frontend/src/pages/ResultsPage.tsx
 ================================================
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -6893,9 +6930,10 @@ interface BatchCandidate {
 
 const ResultsPage = () => {
   const navigate = useNavigate();
-  const location = useLocation();
 
-  const documentIds: string[] = location.state?.documentIds ?? [];
+  // ðŸ”‘ Persistent batch IDs (CRITICAL FIX)
+  const stored = sessionStorage.getItem('authdoc:documentIds');
+  const documentIds: string[] = stored ? JSON.parse(stored) : [];
 
   const [candidates, setCandidates] = useState<BatchCandidate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -6912,13 +6950,15 @@ const ResultsPage = () => {
       .then(res => setCandidates(res.candidates))
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [documentIds]);
+  }, []);
 
   if (loading) {
     return (
       <>
         <Header />
-        <main className="p-8 text-center">Verifying documentsâ€¦</main>
+        <main className="p-8 text-center">
+          Verifying documentsâ€¦
+        </main>
         <Footer />
       </>
     );
@@ -6950,8 +6990,12 @@ const ResultsPage = () => {
             <table className="w-full">
               <thead className="bg-secondary/50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-sm">Document ID</th>
-                  <th className="px-6 py-3 text-left text-sm">Overall Status</th>
+                  <th className="px-6 py-3 text-left text-sm">
+                    Document
+                  </th>
+                  <th className="px-6 py-3 text-left text-sm">
+                    Overall Status
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -6964,7 +7008,8 @@ const ResultsPage = () => {
                     className="cursor-pointer border-b hover:bg-secondary/30"
                   >
                     <td className="px-6 py-4 font-mono text-sm">
-                      {candidate.document_id}
+                      {/* UX-friendly display */}
+                      {candidate.document_id.slice(0, 8)}â€¦
                     </td>
                     <td className="px-6 py-4">
                       <StatusBadge status={candidate.overall_status} />
@@ -6989,7 +7034,113 @@ export default ResultsPage;
 ================================================
 FILE: frontend/src/pages/UploadPage.tsx
 ================================================
-[Binary file]
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Loader2 } from 'lucide-react';
+
+import { ingestDocument } from '@/lib/api';
+import { Header } from '@/components/Header';
+import { Footer } from '@/components/Footer';
+import { FileUploadZone } from '@/components/FileUploadZone';
+import { Button } from '@/components/ui/button';
+
+const UploadPage = () => {
+  const navigate = useNavigate();
+
+  const [files, setFiles] = useState<File[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleFilesSelected = (selectedFiles: File[]) => {
+    setFiles(selectedFiles);
+    setError(null);
+  };
+
+  const handleUpload = async () => {
+    if (files.length === 0) return;
+
+    setIsUploading(true);
+    setError(null);
+
+    try {
+      const documentIds: string[] = [];
+
+      // Upload files one-by-one (contract-safe)
+      for (const file of files) {
+        const { document_id } = await ingestDocument(file);
+        documentIds.push(document_id);
+      }
+
+      // ðŸ”‘ Persist batch IDs (CRITICAL FIX)
+      sessionStorage.setItem(
+        'authdoc:documentIds',
+        JSON.stringify(documentIds)
+      );
+
+      // Navigate WITHOUT state
+      navigate('/results');
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen flex-col">
+      <Header />
+
+      <main className="flex-1 py-12">
+        <div className="container max-w-3xl">
+
+          <div className="mb-8">
+            <h1 className="mb-2 text-3xl font-bold">
+              Batch Upload Academic Documents
+            </h1>
+            <p className="text-muted-foreground">
+              Upload grade sheets for extraction and verification
+            </p>
+          </div>
+
+          <div className="mb-8 rounded-xl border bg-card p-6 lg:p-8">
+            <FileUploadZone onFilesSelected={handleFilesSelected} />
+
+            {files.length > 0 && (
+              <div className="mt-6 flex justify-end">
+                <Button
+                  size="lg"
+                  onClick={handleUpload}
+                  disabled={isUploading}
+                  className="min-w-[180px]"
+                >
+                  {isUploading ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Uploadingâ€¦
+                    </>
+                  ) : (
+                    `Upload ${files.length} File${files.length > 1 ? 's' : ''}`
+                  )}
+                </Button>
+              </div>
+            )}
+
+            {error && (
+              <p className="mt-4 text-sm text-destructive">
+                {error}
+              </p>
+            )}
+          </div>
+        </div>
+      </main>
+
+      <Footer />
+    </div>
+  );
+};
+
+export default UploadPage;
+
 
 
 ================================================
